@@ -1,0 +1,127 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import speech_recognition as sr
+import pyttsx3
+from collections import deque
+import threading
+import time
+
+# ---------------- VOICE ----------------
+engine = pyttsx3.init()
+engine.setProperty("rate", 165)
+
+def speak(text):
+    engine.say(text)
+    engine.runAndWait()
+
+# ---------------- SPEECH LISTENER ----------------
+recognizer = sr.Recognizer()
+current_emotion = "Neutral"
+
+def listen():
+    global current_emotion
+    with sr.Microphone() as src:
+        recognizer.adjust_for_ambient_noise(src)
+        while True:
+            try:
+                audio = recognizer.listen(src, timeout=5)
+                cmd = recognizer.recognize_google(audio).lower()
+                print("Command:", cmd)
+
+                if "mood" in cmd or "emotion" in cmd:
+                    speak(f"You look {current_emotion}")
+
+                if "stop" in cmd or "exit" in cmd:
+                    speak("Stopping system")
+                    exit()
+            except:
+                pass
+
+threading.Thread(target=listen, daemon=True).start()
+
+# ---------------- FACE ----------------
+mp_face = mp.solutions.face_mesh
+face_mesh = mp_face.FaceMesh(refine_landmarks=True)
+
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+
+emotion_buffer = deque(maxlen=20)
+
+baseline = {"mouth": [], "width": [], "eye": []}
+calibrated = False
+start_time = time.time()
+
+def dist(a, b):
+    return np.linalg.norm(np.array(a) - np.array(b))
+
+# ---------------- LOOP ----------------
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    h, w, _ = frame.shape
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    res = face_mesh.process(rgb)
+
+    emotion = "No Face"
+
+    if res.multi_face_landmarks:
+        lm = res.multi_face_landmarks[0].landmark
+
+        def pt(i):
+            return int(lm[i].x * w), int(lm[i].y * h)
+
+        eye_open = (dist(pt(159), pt(145)) + dist(pt(386), pt(374))) / 2
+        mouth_open = dist(pt(13), pt(14))
+        mouth_width = dist(pt(61), pt(291))
+
+        # ---------- CALIBRATION ----------
+        if not calibrated:
+            baseline["mouth"].append(mouth_open)
+            baseline["width"].append(mouth_width)
+            baseline["eye"].append(eye_open)
+
+            cv2.putText(frame, "Calibrating... Keep Neutral",
+                        (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                        (0, 255, 255), 2)
+
+            if time.time() - start_time > 4:
+                for k in baseline:
+                    baseline[k] = np.mean(baseline[k])
+                calibrated = True
+                speak("Calibration complete")
+            cv2.imshow("Mood Detection", frame)
+            cv2.waitKey(1)
+            continue
+
+        # ---------- IMPROVED LOGIC ----------
+        if mouth_width > baseline["width"] * 1.25:
+            emotion = "Happy"
+
+        elif mouth_open > baseline["mouth"] * 1.6 and eye_open > baseline["eye"] * 1.4:
+            emotion = "Surprise"
+
+        elif mouth_open < baseline["mouth"] * 0.75 and eye_open < baseline["eye"] * 0.8:
+            emotion = "Sad"
+
+        else:
+            emotion = "Neutral"
+
+        emotion_buffer.append(emotion)
+        emotion = max(set(emotion_buffer), key=emotion_buffer.count)
+        current_emotion = emotion
+
+    cv2.putText(frame, f"Emotion: {emotion}",
+                (30, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.4,
+                (0, 255, 0), 3)
+
+    cv2.imshow("Mood Detection", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
